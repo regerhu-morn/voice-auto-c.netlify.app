@@ -1,0 +1,754 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>我的 Podcast 產生器</title>
+
+    <!--
+    🚨🚨🚨 解決 Netlify 404 錯誤的關鍵！🚨🚨🚨
+    請在你的專案根目錄下的 public 資料夾中，建立一個名為 "_redirects" 的新檔案。
+    這個檔案沒有副檔名，裡面只包含一行內容：
+    
+    /* /index.html 200
+
+    完成後，將這個檔案一起推送到 Git 倉庫。
+    這將告訴 Netlify 伺服器，將所有無效路徑都導向到你的 index.html 頁面，
+    從而解決單頁應用程式（SPA）的路由問題。
+    -->
+
+    <!-- Tailwind CSS 腳本，用於快速美化頁面 -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <style>
+        /* 使用 Google Fonts 的 Inter 字體 */
+        body {
+            font-family: 'Inter', sans-serif;
+        }
+    </style>
+</head>
+<body>
+
+    <!-- 這是 React 應用程式的根容器 -->
+    <div id="root"></div>
+
+    <!-- 
+    將所有程式碼合併到一個 type="module" 的腳本區塊中。
+    這確保了所有模組和變數都能正確地被載入和存取。
+    -->
+    <script type="module">
+        import React, { useState, useEffect, useRef } from 'https://unpkg.com/react@18/umd/react.production.min.js';
+        import ReactDOM from 'https://unpkg.com/react-dom@18/umd/react-dom.production.min.js';
+        
+        // 導入 Firebase 函式庫
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, doc, deleteDoc, query } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // 🚨 請勿公開你的 API 金鑰。此處僅為示範用途。
+        const GEMINI_API_KEY = "AIzaSyBRDwcceJ4PhOsie2gso3TU6XDH9wQq-p0";
+
+        // Firestore 配置與初始化
+        const firebaseConfig = typeof __firebase_config !== 'undefined' ? JSON.parse(__firebase_config) : {};
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+
+        // 主應用程式組件
+        const App = () => {
+            // 狀態管理
+            const [db, setDb] = useState(null);
+            const [auth, setAuth] = useState(null);
+            const [userId, setUserId] = useState(null);
+            const [textInput, setTextInput] = useState('');
+            const [isConverting, setIsConverting] = useState(false);
+            const [message, setMessage] = useState('');
+            const [files, setFiles] = useState([]);
+            const [audioUrl, setAudioUrl] = useState('');
+            const [playbackRate, setPlaybackRate] = useState(1.0); // 新增播放速度狀態
+            const [categories, setCategories] = useState([]);
+            const [selectedCategory, setSelectedCategory] = useState('');
+            const [newCategoryName, setNewCategoryName] = useState('');
+            const audioRef = useRef(null); // 用於控制 audio 元素
+
+            // Firebase 初始化和身份驗證
+            useEffect(() => {
+                const initializeFirebase = async () => {
+                    try {
+                        const app = initializeApp(firebaseConfig);
+                        const firestoreDb = getFirestore(app);
+                        const firestoreAuth = getAuth(app);
+                        setDb(firestoreDb);
+                        setAuth(firestoreAuth);
+
+                        onAuthStateChanged(firestoreAuth, (user) => {
+                            if (user) {
+                                setUserId(user.uid);
+                            } else {
+                                signInAnonymously(firestoreAuth).then((cred) => {
+                                    setUserId(cred.user.uid);
+                                });
+                            }
+                        });
+
+                        const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                        if (initialAuthToken) {
+                            await signInWithCustomToken(firestoreAuth, initialAuthToken);
+                        } else {
+                            await signInAnonymously(firestoreAuth);
+                        }
+                    } catch (e) {
+                        console.error("Firebase 初始化失敗:", e);
+                        setMessage("Firebase 初始化失敗，請檢查配置。");
+                    }
+                };
+                initializeFirebase();
+            }, []);
+
+            // 實時監聽 Firestore 中的檔案列表和分類
+            useEffect(() => {
+                if (!db || !userId) return;
+
+                // 監聽檔案列表
+                const filesPath = `artifacts/${appId}/public/data/files`;
+                const qFiles = query(collection(db, filesPath));
+                const unsubscribeFiles = onSnapshot(qFiles, (snapshot) => {
+                    const fetchedFiles = snapshot.docs.map(doc => ({
+                        id: doc.id,
+                        ...doc.data()
+                    }));
+                    setFiles(fetchedFiles);
+                }, (error) => {
+                    console.error("監聽檔案列表失敗:", error);
+                    setMessage("無法載入檔案列表。");
+                });
+
+                // 監聽分類列表
+                const categoriesPath = `artifacts/${appId}/public/data/categories`;
+                const qCategories = query(collection(db, categoriesPath));
+                const unsubscribeCategories = onSnapshot(qCategories, (snapshot) => {
+                    const fetchedCategories = snapshot.docs.map(doc => ({
+                        id: doc.id,
+                        name: doc.data().name
+                    }));
+                    setCategories(fetchedCategories);
+                }, (error) => {
+                    console.error("監聽分類列表失敗:", error);
+                    setMessage("無法載入分類列表。");
+                });
+
+                return () => {
+                    unsubscribeFiles();
+                    unsubscribeCategories();
+                };
+            }, [db, userId]);
+
+            // 當播放速度改變時，更新 audio 元素的 playbackRate
+            useEffect(() => {
+                if (audioRef.current) {
+                    audioRef.current.playbackRate = playbackRate;
+                }
+            }, [playbackRate]);
+
+            // --- 工具函式 ---
+            const base64ToArrayBuffer = (base64) => {
+                const binaryString = window.atob(base64);
+                const len = binaryString.length;
+                const bytes = new Uint8Array(len);
+                for (let i = 0; i < len; i++) {
+                    bytes[i] = binaryString.charCodeAt(i);
+                }
+                return bytes.buffer;
+            };
+
+            const pcmToWav = (pcmData, sampleRate) => {
+                const numSamples = pcmData.length;
+                const buffer = new ArrayBuffer(44 + numSamples * 2);
+                const view = new DataView(buffer);
+                let offset = 0;
+                const writeString = (str) => {
+                    for (let i = 0; i < str.length; i++) {
+                        view.setUint8(offset + i, str.charCodeAt(i));
+                    }
+                    offset += str.length;
+                };
+                const writeUint32 = (val) => {
+                    view.setUint32(offset, val, true);
+                    offset += 4;
+                };
+                const writeUint16 = (val) => {
+                    view.setUint16(offset, val, true);
+                    offset += 2;
+                };
+
+                writeString('RIFF');
+                writeUint32(36 + numSamples * 2);
+                writeString('WAVE');
+                writeString('fmt ');
+                writeUint32(16);
+                writeUint16(1);
+                writeUint16(1);
+                writeUint32(sampleRate);
+                writeUint32(sampleRate * 2);
+                writeUint16(2);
+                writeUint16(16);
+                writeString('data');
+                writeUint32(numSamples * 2);
+                
+                for (let i = 0; i < numSamples; i++) {
+                    view.setInt16(offset, pcmData[i], true);
+                    offset += 2;
+                }
+                return new Blob([view], { type: 'audio/wav' });
+            };
+
+            // --- 功能函式 ---
+
+            // 新增資料夾
+            const handleAddCategory = async () => {
+                if (!db || !newCategoryName.trim()) {
+                    setMessage("請輸入資料夾名稱！");
+                    return;
+                }
+
+                try {
+                    await addDoc(collection(db, `artifacts/${appId}/public/data/categories`), {
+                        name: newCategoryName.trim(),
+                        createdAt: Date.now(),
+                    });
+                    setNewCategoryName('');
+                    setMessage(`已新增資料夾：${newCategoryName}`);
+                } catch (error) {
+                    console.error("新增資料夾失敗:", error);
+                    setMessage("新增資料夾失敗。");
+                }
+            };
+
+            // 將文字轉換為語音並上傳到 Firestore
+            const handleConvert = async () => {
+                if (isConverting || !textInput.trim() || !selectedCategory) {
+                    setMessage("請輸入文字並選擇資料夾！");
+                    return;
+                }
+
+                setIsConverting(true);
+                setMessage("轉換中...請稍候...");
+                
+                try {
+                    const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`;
+                    const payload = {
+                        contents: [{ parts: [{ text: textInput }] }],
+                        generationConfig: {
+                            responseModalities: ["AUDIO"],
+                            speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } } }
+                        },
+                        model: "gemini-2.5-flash-preview-tts"
+                    };
+
+                    const response = await fetch(apiUrl, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload)
+                    });
+                    const result = await response.json();
+                    
+                    const part = result?.candidates?.[0]?.content?.parts?.[0];
+                    const audioData = part?.inlineData?.data;
+                    const mimeType = part?.inlineData?.mimeType;
+
+                    if (!audioData || !mimeType) {
+                        throw new Error("API 回傳資料不完整。");
+                    }
+                    
+                    const sampleRateMatch = mimeType.match(/rate=(\d+)/);
+                    const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 16000;
+                    const pcmArrayBuffer = base64ToArrayBuffer(audioData);
+                    const pcm16 = new Int16Array(pcmArrayBuffer);
+                    const wavBlob = pcmToWav(pcm16, sampleRate);
+                    
+                    const fileUrl = URL.createObjectURL(wavBlob);
+                    const fileName = `Podcast_${Date.now()}.wav`;
+
+                    // 將檔案資訊新增到 Firestore，包含資料夾資訊
+                    await addDoc(collection(db, `artifacts/${appId}/public/data/files`), {
+                        name: fileName,
+                        url: fileUrl,
+                        createdAt: Date.now(),
+                        userId: userId,
+                        category: selectedCategory,
+                    });
+
+                    setMessage("轉換並儲存成功！");
+                    setTextInput('');
+                } catch (error) {
+                    console.error("轉換失敗:", error);
+                    setMessage(`轉換失敗: ${error.message}`);
+                } finally {
+                    setIsConverting(false);
+                }
+            };
+
+            // 手動上傳檔案
+            const handleUpload = async (e) => {
+                const file = e.target.files[0];
+                if (!file || !selectedCategory) {
+                    setMessage("請選擇一個檔案並選擇資料夾！");
+                    return;
+                }
+
+                setMessage("上傳中...");
+                
+                try {
+                    const fileUrl = URL.createObjectURL(file);
+                    const fileName = file.name;
+
+                    await addDoc(collection(db, `artifacts/${appId}/public/data/files`), {
+                        name: fileName,
+                        url: fileUrl,
+                        createdAt: Date.now(),
+                        userId: userId,
+                        category: selectedCategory,
+                    });
+
+                    setMessage("上傳成功！");
+                } catch (error) {
+                    console.error("上傳失敗:", error);
+                    setMessage(`上傳失敗: ${error.message}`);
+                }
+            };
+
+            // 刪除檔案
+            const handleDelete = async (id, url) => {
+                try {
+                    await deleteDoc(doc(db, `artifacts/${appId}/public/data/files`, id));
+                    URL.revokeObjectURL(url);
+                    setMessage("檔案已刪除！");
+                } catch (error) {
+                    console.error("刪除失敗:", error);
+                    setMessage("刪除失敗。");
+                }
+            };
+
+            // 播放檔案
+            const handlePlay = (url) => {
+                setAudioUrl(url);
+                setMessage("正在播放音檔...");
+            };
+
+            const App = () => {
+                // 狀態管理
+                const [db, setDb] = useState(null);
+                const [auth, setAuth] = useState(null);
+                const [userId, setUserId] = useState(null);
+                const [textInput, setTextInput] = useState('');
+                const [isConverting, setIsConverting] = useState(false);
+                const [message, setMessage] = useState('');
+                const [files, setFiles] = useState([]);
+                const [audioUrl, setAudioUrl] = useState('');
+                const [playbackRate, setPlaybackRate] = useState(1.0);
+                const [categories, setCategories] = useState([]);
+                const [selectedCategory, setSelectedCategory] = useState('');
+                const [newCategoryName, setNewCategoryName] = useState('');
+                const audioRef = useRef(null);
+
+                // Firebase 初始化和身份驗證
+                useEffect(() => {
+                    const initializeFirebase = async () => {
+                        try {
+                            const app = initializeApp(firebaseConfig);
+                            const firestoreDb = getFirestore(app);
+                            const firestoreAuth = getAuth(app);
+                            setDb(firestoreDb);
+                            setAuth(firestoreAuth);
+
+                            onAuthStateChanged(firestoreAuth, (user) => {
+                                if (user) {
+                                    setUserId(user.uid);
+                                } else {
+                                    signInAnonymously(firestoreAuth).then((cred) => {
+                                        setUserId(cred.user.uid);
+                                    });
+                                }
+                            });
+
+                            const initialAuthToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
+                            if (initialAuthToken) {
+                                await signInWithCustomToken(firestoreAuth, initialAuthToken);
+                            } else {
+                                await signInAnonymously(firestoreAuth);
+                            }
+                        } catch (e) {
+                            console.error("Firebase 初始化失敗:", e);
+                            setMessage("Firebase 初始化失敗，請檢查配置。");
+                        }
+                    };
+                    initializeFirebase();
+                }, []);
+
+                // 實時監聽 Firestore
+                useEffect(() => {
+                    if (!db || !userId) return;
+
+                    const filesPath = `artifacts/${appId}/public/data/files`;
+                    const qFiles = query(collection(db, filesPath));
+                    const unsubscribeFiles = onSnapshot(qFiles, (snapshot) => {
+                        const fetchedFiles = snapshot.docs.map(doc => ({
+                            id: doc.id,
+                            ...doc.data()
+                        }));
+                        setFiles(fetchedFiles);
+                    }, (error) => {
+                        console.error("監聽檔案列表失敗:", error);
+                        setMessage("無法載入檔案列表。");
+                    });
+
+                    const categoriesPath = `artifacts/${appId}/public/data/categories`;
+                    const qCategories = query(collection(db, categoriesPath));
+                    const unsubscribeCategories = onSnapshot(qCategories, (snapshot) => {
+                        const fetchedCategories = snapshot.docs.map(doc => ({
+                            id: doc.id,
+                            name: doc.data().name
+                        }));
+                        setCategories(fetchedCategories);
+                    }, (error) => {
+                        console.error("監聽分類列表失敗:", error);
+                        setMessage("無法載入分類列表。");
+                    });
+
+                    return () => {
+                        unsubscribeFiles();
+                        unsubscribeCategories();
+                    };
+                }, [db, userId]);
+
+                // 當播放速度改變時，更新 audio 元素的 playbackRate
+                useEffect(() => {
+                    if (audioRef.current) {
+                        audioRef.current.playbackRate = playbackRate;
+                    }
+                }, [playbackRate]);
+
+                // 其他函式...
+                const base64ToArrayBuffer = (base64) => {
+                    const binaryString = window.atob(base64);
+                    const len = binaryString.length;
+                    const bytes = new Uint8Array(len);
+                    for (let i = 0; i < len; i++) {
+                        bytes[i] = binaryString.charCodeAt(i);
+                    }
+                    return bytes.buffer;
+                };
+
+                const pcmToWav = (pcmData, sampleRate) => {
+                    const numSamples = pcmData.length;
+                    const buffer = new ArrayBuffer(44 + numSamples * 2);
+                    const view = new DataView(buffer);
+                    let offset = 0;
+                    const writeString = (str) => {
+                        for (let i = 0; i < str.length; i++) {
+                            view.setUint8(offset + i, str.charCodeAt(i));
+                        }
+                        offset += str.length;
+                    };
+                    const writeUint32 = (val) => {
+                        view.setUint32(offset, val, true);
+                        offset += 4;
+                    };
+                    const writeUint16 = (val) => {
+                        view.setUint16(offset, val, true);
+                        offset += 2;
+                    };
+                    writeString('RIFF');
+                    writeUint32(36 + numSamples * 2);
+                    writeString('WAVE');
+                    writeString('fmt ');
+                    writeUint32(16);
+                    writeUint16(1);
+                    writeUint16(1);
+                    writeUint32(sampleRate);
+                    writeUint32(sampleRate * 2);
+                    writeUint16(2);
+                    writeUint16(16);
+                    writeString('data');
+                    writeUint32(numSamples * 2);
+                    
+                    for (let i = 0; i < numSamples; i++) {
+                        view.setInt16(offset, pcmData[i], true);
+                        offset += 2;
+                    }
+                    return new Blob([view], { type: 'audio/wav' });
+                };
+
+                const handleAddCategory = async () => {
+                    if (!db || !newCategoryName.trim()) {
+                        setMessage("請輸入資料夾名稱！");
+                        return;
+                    }
+                    try {
+                        await addDoc(collection(db, `artifacts/${appId}/public/data/categories`), {
+                            name: newCategoryName.trim(),
+                            createdAt: Date.now(),
+                        });
+                        setNewCategoryName('');
+                        setMessage(`已新增資料夾：${newCategoryName}`);
+                    } catch (error) {
+                        console.error("新增資料夾失敗:", error);
+                        setMessage("新增資料夾失敗。");
+                    }
+                };
+
+                const handleConvert = async () => {
+                    if (isConverting || !textInput.trim() || !selectedCategory) {
+                        setMessage("請輸入文字並選擇資料夾！");
+                        return;
+                    }
+
+                    setIsConverting(true);
+                    setMessage("轉換中...請稍候...");
+                    
+                    try {
+                        const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`;
+                        const payload = {
+                            contents: [{ parts: [{ text: textInput }] }],
+                            generationConfig: {
+                                responseModalities: ["AUDIO"],
+                                speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } } }
+                            },
+                            model: "gemini-2.5-flash-preview-tts"
+                        };
+
+                        const response = await fetch(apiUrl, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(payload)
+                        });
+                        const result = await response.json();
+                        
+                        const part = result?.candidates?.[0]?.content?.parts?.[0];
+                        const audioData = part?.inlineData?.data;
+                        const mimeType = part?.inlineData?.mimeType;
+
+                        if (!audioData || !mimeType) {
+                            throw new Error("API 回傳資料不完整。");
+                        }
+                        
+                        const sampleRateMatch = mimeType.match(/rate=(\d+)/);
+                        const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 16000;
+                        const pcmArrayBuffer = base64ToArrayBuffer(audioData);
+                        const pcm16 = new Int16Array(pcmArrayBuffer);
+                        const wavBlob = pcmToWav(pcm16, sampleRate);
+                        
+                        const fileUrl = URL.createObjectURL(wavBlob);
+                        const fileName = `Podcast_${Date.now()}.wav`;
+
+                        await addDoc(collection(db, `artifacts/${appId}/public/data/files`), {
+                            name: fileName,
+                            url: fileUrl,
+                            createdAt: Date.now(),
+                            userId: userId,
+                            category: selectedCategory,
+                        });
+
+                        setMessage("轉換並儲存成功！");
+                        setTextInput('');
+                    } catch (error) {
+                        console.error("轉換失敗:", error);
+                        setMessage(`轉換失敗: ${error.message}`);
+                    } finally {
+                        setIsConverting(false);
+                    }
+                };
+
+                const handleUpload = async (e) => {
+                    const file = e.target.files[0];
+                    if (!file || !selectedCategory) {
+                        setMessage("請選擇一個檔案並選擇資料夾！");
+                        return;
+                    }
+                    setMessage("上傳中...");
+                    
+                    try {
+                        const fileUrl = URL.createObjectURL(file);
+                        const fileName = file.name;
+
+                        await addDoc(collection(db, `artifacts/${appId}/public/data/files`), {
+                            name: fileName,
+                            url: fileUrl,
+                            createdAt: Date.now(),
+                            userId: userId,
+                            category: selectedCategory,
+                        });
+
+                        setMessage("上傳成功！");
+                    } catch (error) {
+                        console.error("上傳失敗:", error);
+                        setMessage(`上傳失敗: ${error.message}`);
+                    }
+                };
+
+                const handleDelete = async (id, url) => {
+                    try {
+                        await deleteDoc(doc(db, `artifacts/${appId}/public/data/files`, id));
+                        URL.revokeObjectURL(url);
+                        setMessage("檔案已刪除！");
+                    } catch (error) {
+                        console.error("刪除失敗:", error);
+                        setMessage("刪除失敗。");
+                    }
+                };
+
+                const handlePlay = (url) => {
+                    setAudioUrl(url);
+                    setMessage("正在播放音檔...");
+                };
+
+                return (
+                    <div className="bg-gray-100 min-h-screen p-4 sm:p-8 flex flex-col items-center font-sans">
+                        <div className="bg-white rounded-xl shadow-lg p-6 sm:p-10 w-full max-w-3xl">
+                            <h1 className="text-3xl font-bold text-center text-gray-800 mb-6">我的 Podcast 產生器</h1>
+                            
+                            {userId && (
+                                <div className="bg-gray-200 p-2 rounded-lg text-sm text-gray-600 text-center mb-4">
+                                    <span className="font-semibold">使用者 ID:</span> {userId}
+                                </div>
+                            )}
+
+                            {/* 通知區塊 */}
+                            {message && (
+                                <div className="bg-blue-100 border-l-4 border-blue-500 text-blue-700 p-4 mb-6 rounded-md" role="alert">
+                                    {message}
+                                </div>
+                            )}
+
+                            {/* 資料夾管理區塊 */}
+                            <h2 className="text-xl font-semibold text-gray-700 mb-3">管理資料夾</h2>
+                            <div className="flex flex-col sm:flex-row items-center gap-4 mb-6">
+                                <input
+                                    type="text"
+                                    className="flex-grow p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none transition-all duration-200"
+                                    placeholder="新增資料夾名稱..."
+                                    value={newCategoryName}
+                                    onChange={(e) => setNewCategoryName(e.target.value)}
+                                />
+                                <button
+                                    className="px-6 py-2 rounded-lg text-white font-medium bg-gray-600 hover:bg-gray-700 transition-all duration-200"
+                                    onClick={handleAddCategory}
+                                >
+                                    新增
+                                </button>
+                            </div>
+
+                            {/* 檔案操作區塊 - 選擇資料夾 */}
+                            <h2 className="text-xl font-semibold text-gray-700 mb-3">選擇資料夾</h2>
+                            <div className="flex flex-col sm:flex-row items-center gap-4 mb-6">
+                                <select
+                                    className="flex-grow p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none transition-all duration-200"
+                                    value={selectedCategory}
+                                    onChange={(e) => setSelectedCategory(e.target.value)}
+                                >
+                                    <option value="">-- 請選擇資料夾 --</option>
+                                    {categories.map((cat) => (
+                                        <option key={cat.id} value={cat.name}>{cat.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+
+                            {/* 文字轉語音區塊 */}
+                            <h2 className="text-xl font-semibold text-gray-700 mb-3">文字轉語音</h2>
+                            <div className="flex flex-col sm:flex-row gap-4 mb-6">
+                                <textarea
+                                    className="flex-grow p-4 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all duration-200 resize-none"
+                                    placeholder="輸入您想轉換的文字..."
+                                    value={textInput}
+                                    onChange={(e) => setTextInput(e.target.value)}
+                                    rows="4"
+                                ></textarea>
+                                <button
+                                    className={`px-6 py-2 rounded-lg text-white font-medium transition-all duration-200 ${isConverting ? 'bg-gray-400 cursor-not-allowed' : 'bg-blue-600 hover:bg-blue-700'}`}
+                                    onClick={handleConvert}
+                                    disabled={isConverting || !selectedCategory}
+                                >
+                                    {isConverting ? '轉換中...' : '轉換並儲存'}
+                                </button>
+                            </div>
+
+                            {/* 檔案上傳區塊 */}
+                            <h2 className="text-xl font-semibold text-gray-700 mb-3">上傳音檔</h2>
+                            <div className="flex flex-col sm:flex-row items-center gap-4 mb-6">
+                                <input
+                                    type="file"
+                                    accept="audio/*"
+                                    onChange={handleUpload}
+                                    className="flex-grow text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
+                                />
+                            </div>
+
+                            {/* 播放器與速度調整 */}
+                            <div className="flex flex-col sm:flex-row items-center justify-between mb-4">
+                                <h2 className="text-xl font-semibold text-gray-700 mb-2 sm:mb-0">播放器</h2>
+                                <div className="flex items-center gap-2">
+                                    <label className="text-gray-700 font-medium">播放速度:</label>
+                                    <select
+                                        className="p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none transition-all duration-200"
+                                        value={playbackRate}
+                                        onChange={(e) => setPlaybackRate(e.target.value)}
+                                    >
+                                        <option value="0.5">0.5x</option>
+                                        <option value="0.75">0.75x</option>
+                                        <option value="1.0">1.0x (標準)</option>
+                                        <option value="1.25">1.25x</option>
+                                        <option value="1.5">1.5x</option>
+                                        <option value="1.75">1.75x</option>
+                                        <option value="2.0">2.0x</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <audio ref={audioRef} controls src={audioUrl} className="w-full"></audio>
+
+                            {/* 檔案列表 */}
+                            <h2 className="text-xl font-semibold text-gray-700 mt-6 mb-3">我的檔案列表</h2>
+                            <div className="bg-gray-50 rounded-lg p-4 mb-6">
+                                {files.length > 0 ? (
+                                    <ul className="divide-y divide-gray-200">
+                                        {files.map((file) => (
+                                            <li key={file.id} className="py-3 flex flex-col sm:flex-row items-start sm:items-center justify-between">
+                                                <div className="sm:truncate sm:flex-1 mb-2 sm:mb-0 mr-4">
+                                                    <span className="text-gray-800 font-medium">{file.name}</span>
+                                                    {file.category && (
+                                                        <span className="text-xs text-gray-500 ml-2 px-2 py-1 bg-gray-200 rounded-full">{file.category}</span>
+                                                    )}
+                                                </div>
+                                                <div className="flex flex-wrap gap-2">
+                                                    <button
+                                                        className="px-4 py-2 rounded-md bg-green-500 text-white text-sm hover:bg-green-600 transition-colors duration-200"
+                                                        onClick={() => handlePlay(file.url)}
+                                                    >
+                                                        播放
+                                                    </button>
+                                                    <a href={file.url} download={file.name}>
+                                                        <button className="px-4 py-2 rounded-md bg-indigo-500 text-white text-sm hover:bg-indigo-600 transition-colors duration-200">
+                                                            下載
+                                                        </button>
+                                                    </a>
+                                                    <button
+                                                        className="px-4 py-2 rounded-md bg-red-500 text-white text-sm hover:bg-red-600 transition-colors duration-200"
+                                                        onClick={() => handleDelete(file.id, file.url)}
+                                                    >
+                                                        刪除
+                                                    </button>
+                                                </div>
+                                            </li>
+                                        ))}
+                                    </ul>
+                                ) : (
+                                    <p className="text-gray-500 italic">目前沒有任何檔案。請轉換文字或上傳檔案。</p>
+                                )}
+                            </div>
+                        </div>
+                    </div>
+                );
+            };
+
+            ReactDOM.render(<App />, document.getElementById('root'));
+        </script>
+
+    </body>
+</html>
