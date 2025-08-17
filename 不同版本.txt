@@ -1,5 +1,0 @@
-檔案掛在git上面更新要從這邊更新，程式碼貼到上面的資料夾  my-podcast-app，在上載到Git
-
-
-1.8-17
-commit 4776013e45118c8c11a66fe5a6d517d58e0c3ec1 
