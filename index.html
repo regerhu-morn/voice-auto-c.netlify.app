@@ -32,7 +32,7 @@
         let playbackRate = 1.0;
         let audioRef = new Audio();
         let isConverting = false;
-        let currentCategory = ''; // 新增的變數，用於儲存當前選定的資料夾
+        let currentCategory = '';
 
         // --- 工具函式 ---
         const base64ToArrayBuffer = (base64) => {
@@ -125,6 +125,8 @@
                         <option value="">-- 顯示所有檔案 --</option>
                         ${categories.map(cat => `<option value="${cat.name}" ${cat.name === currentCategory ? 'selected' : ''}>${cat.name}</option>`).join('')}
                     </select>
+                    <!-- 新增的刪除資料夾按鈕 -->
+                    <button id="delete-category-btn" class="px-6 py-2 rounded-lg text-white font-medium bg-red-600 hover:bg-red-700 transition-all duration-200">刪除選定資料夾</button>
                 </div>
 
                 <!-- 文字轉語音區塊 -->
@@ -189,6 +191,12 @@
             const addCategoryBtn = document.getElementById('add-category-btn');
             if (addCategoryBtn) {
                 addCategoryBtn.addEventListener('click', handleAddCategory);
+            }
+
+            // 新增的事件監聽器
+            const deleteCategoryBtn = document.getElementById('delete-category-btn');
+            if (deleteCategoryBtn) {
+                deleteCategoryBtn.addEventListener('click', handleDeleteCategory);
             }
 
             const convertBtn = document.getElementById('convert-btn');
@@ -256,12 +264,7 @@
 
         const handleCategoryFilter = () => {
             const selectedCategory = document.getElementById('category-select').value;
-            currentCategory = selectedCategory; // 更新當前選定的資料夾
-            if (selectedCategory) {
-                displayedFiles = allFiles.filter(file => file.category === selectedCategory);
-            } else {
-                displayedFiles = [...allFiles];
-            }
+            currentCategory = selectedCategory;
             renderUI();
         };
 
@@ -277,9 +280,34 @@
             categories.push(newCategory);
             saveToLocalStorage();
             newCategoryInput.value = '';
-            currentCategory = newCategoryName; // 新增後自動選擇
+            currentCategory = newCategoryName;
             renderUI();
             showMessage(`已新增資料夾：${newCategoryName}`);
+        };
+
+        // 新增的刪除資料夾函式
+        const handleDeleteCategory = () => {
+            const selectedCategory = document.getElementById('category-select').value;
+            if (!selectedCategory) {
+                showMessage("請先選擇一個資料夾才能刪除！");
+                return;
+            }
+
+            const isConfirmed = window.confirm(`你確定要刪除資料夾「${selectedCategory}」嗎？這個動作將同時刪除所有屬於這個資料夾的檔案，且無法復原！`);
+            
+            if (isConfirmed) {
+                // 刪除該資料夾內的所有檔案
+                allFiles = allFiles.filter(file => file.category !== selectedCategory);
+                
+                // 刪除該資料夾本身
+                categories = categories.filter(cat => cat.name !== selectedCategory);
+
+                // 將當前選定的資料夾重設為空，顯示所有檔案
+                currentCategory = '';
+                saveToLocalStorage();
+                renderUI();
+                showMessage(`資料夾「${selectedCategory}」及其所有檔案已刪除！`);
+            }
         };
 
         const handleConvert = async () => {
@@ -353,7 +381,7 @@
 
                 allFiles.unshift(newFile);
                 saveToLocalStorage();
-                currentCategory = selectedCategory; // 確保完成後仍然選中
+                currentCategory = selectedCategory;
                 renderUI();
 
                 showMessage("轉換並儲存成功！");
@@ -398,7 +426,7 @@
 
                 allFiles.unshift(newFile);
                 saveToLocalStorage();
-                currentCategory = selectedCategory; // 確保完成後仍然選中
+                currentCategory = selectedCategory;
                 renderUI();
 
                 showMessage("上傳成功！");
@@ -419,7 +447,6 @@
 
         // --- 應用程式初始化 ---
         window.onload = () => {
-            // 從本地儲存中讀取上次選擇的資料夾
             const lastCategory = localStorage.getItem('lastCategory');
             if (lastCategory) {
                 currentCategory = lastCategory;
