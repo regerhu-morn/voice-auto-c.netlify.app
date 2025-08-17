@@ -22,9 +22,6 @@
 
     <!-- 主應用程式腳本 -->
     <script type="module">
-        // 🚨 請勿公開你的 API 金鑰。此處由環境自動提供
-        const GEMINI_API_KEY = "";
-
         let allFiles = JSON.parse(localStorage.getItem('podcastFiles')) || [];
         let categories = JSON.parse(localStorage.getItem('podcastCategories')) || [];
         let displayedFiles = [...allFiles];
@@ -33,10 +30,19 @@
         let audioRef = new Audio();
         let isConverting = false;
         let currentCategory = '';
+        let isPlaying = false;
 
+        // 定義可供選擇的語音選項
+        const voiceOptions = [
+            { name: "美式男聲 (Orus)", value: "Orus" },
+            { name: "美式女聲 (Vindemiatrix)", value: "Vindemiatrix" }
+        ];
+        
         // --- 工具函式 ---
+
+        // 將 Base64 轉換為 ArrayBuffer
         const base64ToArrayBuffer = (base64) => {
-            const binaryString = window.atob(base64);
+            const binaryString = atob(base64);
             const len = binaryString.length;
             const bytes = new Uint8Array(len);
             for (let i = 0; i < len; i++) {
@@ -45,49 +51,53 @@
             return bytes.buffer;
         };
 
+        // 將 PCM 資料轉換為 WAV 格式
         const pcmToWav = (pcmData, sampleRate) => {
-            const numSamples = pcmData.length;
-            const buffer = new ArrayBuffer(44 + numSamples * 2);
+            const pcm16 = new Int16Array(pcmData);
+            const buffer = new ArrayBuffer(44 + pcm16.length * 2);
             const view = new DataView(buffer);
-            let offset = 0;
-            const writeString = (str) => {
-                for (let i = 0; i < str.length; i++) {
-                    view.setUint8(offset + i, str.charCodeAt(i));
+            
+            // WAV 標頭
+            const writeString = (view, offset, string) => {
+                for (let i = 0; i < string.length; i++) {
+                    view.setUint8(offset + i, string.charCodeAt(i));
                 }
-                offset += str.length;
-            };
-            const writeUint32 = (val) => {
-                view.setUint32(offset, val, true);
-                offset += 4;
-            };
-            const writeUint16 = (val) => {
-                view.setUint16(offset, val, true);
-                offset += 2;
             };
 
-            writeString('RIFF');
-            writeUint32(36 + numSamples * 2);
-            writeString('WAVE');
-            writeString('fmt ');
-            writeUint32(16);
-            writeUint16(1);
-            writeUint16(1);
-            writeUint32(sampleRate);
-            writeUint32(sampleRate * 2);
-            writeUint16(2);
-            writeUint16(16);
-            writeString('data');
-            writeUint32(numSamples * 2);
+            const format = 1; // PCM
+            const channels = 1; // 單聲道
+            const bitsPerSample = 16;
+            const byteRate = sampleRate * channels * bitsPerSample / 8;
+            const blockAlign = channels * bitsPerSample / 8;
+
+            // RIFF chunk
+            writeString(view, 0, 'RIFF');
+            view.setUint32(4, 36 + pcm16.length * 2, true);
+            writeString(view, 8, 'WAVE');
+
+            // fmt chunk
+            writeString(view, 12, 'fmt ');
+            view.setUint32(16, 16, true);
+            view.setUint16(20, format, true);
+            view.setUint16(22, channels, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, byteRate, true);
+            view.setUint16(32, blockAlign, true);
+            view.setUint16(34, bitsPerSample, true);
+
+            // data chunk
+            writeString(view, 36, 'data');
+            view.setUint32(40, pcm16.length * 2, true);
             
-            for (let i = 0; i < numSamples; i++) {
-                view.setInt16(offset, pcmData[i], true);
-                offset += 2;
+            // 寫入 PCM 資料
+            let offset = 44;
+            for (let i = 0; i < pcm16.length; i++, offset += 2) {
+                view.setInt16(offset, pcm16[i], true);
             }
+            
             return new Blob([view], { type: 'audio/wav' });
         };
         
-        // --- UI 更新與事件處理 ---
-
         const showMessage = (text) => {
             const messageEl = document.getElementById('message-box');
             if (messageEl) {
@@ -100,7 +110,6 @@
             const appContainer = document.getElementById('app-container');
             if (!appContainer) return;
 
-            // 根據 currentCategory 過濾檔案
             if (currentCategory) {
                 displayedFiles = allFiles.filter(file => file.category === currentCategory);
             } else {
@@ -125,21 +134,30 @@
                         <option value="">-- 顯示所有檔案 --</option>
                         ${categories.map(cat => `<option value="${cat.name}" ${cat.name === currentCategory ? 'selected' : ''}>${cat.name}</option>`).join('')}
                     </select>
-                    <!-- 新增的刪除資料夾按鈕 -->
                     <button id="delete-category-btn" class="px-6 py-2 rounded-lg text-white font-medium bg-red-600 hover:bg-red-700 transition-all duration-200">刪除選定資料夾</button>
                 </div>
 
                 <!-- 文字轉語音區塊 -->
                 <h2 class="text-xl font-semibold text-gray-700 mb-3">文字轉語音</h2>
-                <div class="flex flex-col sm:flex-row gap-4 mb-6">
-                    <textarea id="text-input" class="flex-grow p-4 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all duration-200 resize-none" placeholder="輸入您想轉換的文字..." rows="4"></textarea>
-                    <button id="convert-btn" class="px-6 py-2 rounded-lg text-white font-medium transition-all duration-200 bg-blue-600 hover:bg-blue-700">轉換並儲存</button>
+                <div class="flex flex-col gap-4 mb-6">
+                    <!-- 語音選擇器 -->
+                    <div class="flex items-center gap-2">
+                        <label class="text-gray-700 font-medium whitespace-nowrap">選擇語音:</label>
+                        <select id="voice-select" class="w-full p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none transition-all duration-200">
+                           ${voiceOptions.map(voice => `<option value="${voice.value}">${voice.name}</option>`).join('')}
+                        </select>
+                    </div>
+                    <div class="flex flex-col sm:flex-row gap-4">
+                        <textarea id="text-input" class="flex-grow p-4 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition-all duration-200 resize-none" placeholder="輸入您想轉換的文字..." rows="4"></textarea>
+                        <button id="convert-btn" class="px-6 py-2 rounded-lg text-white font-medium transition-all duration-200 bg-blue-600 hover:bg-blue-700">轉換並儲存</button>
+                    </div>
                 </div>
 
                 <!-- 檔案上傳區塊 -->
                 <h2 class="text-xl font-semibold text-gray-700 mb-3">上傳音檔</h2>
                 <div class="flex flex-col sm:flex-row items-center gap-4 mb-6">
                     <input id="file-upload-input" type="file" accept="audio/*" class="flex-grow text-gray-700 file:mr-4 file:py-2 file:px-4 file:rounded-full file:border-0 file:text-sm file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100">
+                    <button id="upload-btn" class="px-6 py-2 rounded-lg text-white font-medium transition-all duration-200 bg-gray-600 hover:bg-gray-700">上傳檔案</button>
                 </div>
 
                 <!-- 播放器與速度調整 -->
@@ -193,7 +211,6 @@
                 addCategoryBtn.addEventListener('click', handleAddCategory);
             }
 
-            // 新增的事件監聽器
             const deleteCategoryBtn = document.getElementById('delete-category-btn');
             if (deleteCategoryBtn) {
                 deleteCategoryBtn.addEventListener('click', handleDeleteCategory);
@@ -203,10 +220,10 @@
             if (convertBtn) {
                 convertBtn.addEventListener('click', handleConvert);
             }
-
-            const fileUploadInput = document.getElementById('file-upload-input');
-            if (fileUploadInput) {
-                fileUploadInput.addEventListener('change', handleUpload);
+            
+            const uploadBtn = document.getElementById('upload-btn');
+            if (uploadBtn) {
+                uploadBtn.addEventListener('click', handleUpload);
             }
 
             const playbackRateSelect = document.getElementById('playback-rate-select');
@@ -285,7 +302,6 @@
             showMessage(`已新增資料夾：${newCategoryName}`);
         };
 
-        // 新增的刪除資料夾函式
         const handleDeleteCategory = () => {
             const selectedCategory = document.getElementById('category-select').value;
             if (!selectedCategory) {
@@ -293,16 +309,12 @@
                 return;
             }
 
-            const isConfirmed = window.confirm(`你確定要刪除資料夾「${selectedCategory}」嗎？這個動作將同時刪除所有屬於這個資料夾的檔案，且無法復原！`);
+            const confirmation = window.confirm(`你確定要刪除資料夾「${selectedCategory}」嗎？這個動作將同時刪除所有屬於這個資料夾的檔案，且無法復原！`);
             
-            if (isConfirmed) {
-                // 刪除該資料夾內的所有檔案
+            if (confirmation) {
                 allFiles = allFiles.filter(file => file.category !== selectedCategory);
-                
-                // 刪除該資料夾本身
                 categories = categories.filter(cat => cat.name !== selectedCategory);
 
-                // 將當前選定的資料夾重設為空，顯示所有檔案
                 currentCategory = '';
                 saveToLocalStorage();
                 renderUI();
@@ -314,6 +326,7 @@
             const textInputEl = document.getElementById('text-input');
             const textInput = textInputEl.value.trim();
             const selectedCategory = document.getElementById('category-select').value;
+            const selectedVoiceName = document.getElementById('voice-select').value;
             
             if (isConverting) {
                 return;
@@ -338,38 +351,48 @@
             showMessage("轉換中...請稍候...");
             
             try {
-                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${GEMINI_API_KEY}`;
                 const payload = {
-                    contents: [{ parts: [{ text: textInput }] }],
+                    contents: [{
+                        parts: [{ text: textInput }]
+                    }],
                     generationConfig: {
                         responseModalities: ["AUDIO"],
-                        speechConfig: { voiceConfig: { prebuiltVoiceConfig: { voiceName: "Puck" } } }
+                        speechConfig: {
+                            voiceConfig: {
+                                // 使用使用者選擇的語音名稱
+                                prebuiltVoiceConfig: { voiceName: selectedVoiceName }
+                            }
+                        }
                     },
                     model: "gemini-2.5-flash-preview-tts"
                 };
-
+                const apiKey = ""; // API 金鑰將由系統自動提供
+                const apiUrl = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-tts:generateContent?key=${apiKey}`;
+                
                 const response = await fetch(apiUrl, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify(payload)
                 });
-                const result = await response.json();
                 
+                if (!response.ok) {
+                    throw new Error(`API 錯誤: ${response.status} ${response.statusText}`);
+                }
+                
+                const result = await response.json();
                 const part = result?.candidates?.[0]?.content?.parts?.[0];
                 const audioData = part?.inlineData?.data;
                 const mimeType = part?.inlineData?.mimeType;
 
-                if (!audioData || !mimeType) {
+                if (!audioData || !mimeType || !mimeType.startsWith("audio/")) {
                     throw new Error("API 回傳資料不完整。");
                 }
                 
-                const sampleRateMatch = mimeType.match(/rate=(\d+)/);
-                const sampleRate = sampleRateMatch ? parseInt(sampleRateMatch[1], 10) : 16000;
-                const pcmArrayBuffer = base64ToArrayBuffer(audioData);
-                const pcm16 = new Int16Array(pcmArrayBuffer);
-                const wavBlob = pcmToWav(pcm16, sampleRate);
-                
+                const sampleRate = parseInt(mimeType.match(/rate=(\d+)/)[1], 10);
+                const pcmData = base64ToArrayBuffer(audioData);
+                const wavBlob = pcmToWav(pcmData, sampleRate);
                 const fileUrl = URL.createObjectURL(wavBlob);
+                
                 const fileName = `Podcast_${Date.now()}.wav`;
 
                 const newFile = {
@@ -386,9 +409,10 @@
 
                 showMessage("轉換並儲存成功！");
                 textInputEl.value = '';
+
             } catch (error) {
                 console.error("轉換失敗:", error);
-                showMessage(`轉換失敗: ${error.message}`);
+                showMessage(`轉換失敗: ${error.message}。請稍後再試。`);
             } finally {
                 isConverting = false;
                 convertBtn.textContent = '轉換並儲存';
@@ -398,16 +422,17 @@
             }
         };
 
-        const handleUpload = (e) => {
-            const file = e.target.files[0];
+        const handleUpload = () => {
+            const fileInput = document.getElementById('file-upload-input');
+            const file = fileInput.files[0];
             const selectedCategory = document.getElementById('category-select').value;
             
             if (!file) {
-                showMessage("請選擇一個檔案！");
+                showMessage("請先選擇一個檔案！");
                 return;
             }
             if (!selectedCategory) {
-                showMessage("請選擇一個資料夾！");
+                showMessage("請先選擇一個資料夾！");
                 return;
             }
 
@@ -439,7 +464,9 @@
         const handleDelete = (id, url) => {
             allFiles = allFiles.filter(file => file.id != id);
             saveToLocalStorage();
-            URL.revokeObjectURL(url);
+            if (url && url !== '#') {
+                URL.revokeObjectURL(url);
+            }
             handleCategoryFilter();
             renderUI();
             showMessage("檔案已刪除！");
