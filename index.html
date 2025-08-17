@@ -27,11 +27,12 @@
 
         let allFiles = JSON.parse(localStorage.getItem('podcastFiles')) || [];
         let categories = JSON.parse(localStorage.getItem('podcastCategories')) || [];
-        let displayedFiles = [...allFiles]; // 預設顯示所有檔案
+        let displayedFiles = [...allFiles];
         let audioUrl = '';
         let playbackRate = 1.0;
         let audioRef = new Audio();
         let isConverting = false;
+        let currentCategory = ''; // 新增的變數，用於儲存當前選定的資料夾
 
         // --- 工具函式 ---
         const base64ToArrayBuffer = (base64) => {
@@ -98,6 +99,13 @@
         const renderUI = () => {
             const appContainer = document.getElementById('app-container');
             if (!appContainer) return;
+
+            // 根據 currentCategory 過濾檔案
+            if (currentCategory) {
+                displayedFiles = allFiles.filter(file => file.category === currentCategory);
+            } else {
+                displayedFiles = [...allFiles];
+            }
             
             appContainer.innerHTML = `
                 <h1 class="text-3xl font-bold text-center text-gray-800 mb-6">我的 Podcast 產生器</h1>
@@ -115,7 +123,7 @@
                 <div class="flex flex-col sm:flex-row items-center gap-4 mb-6">
                     <select id="category-select" class="flex-grow p-2 border border-gray-300 rounded-md focus:ring-2 focus:ring-blue-500 outline-none transition-all duration-200">
                         <option value="">-- 顯示所有檔案 --</option>
-                        ${categories.map(cat => `<option value="${cat.name}">${cat.name}</option>`).join('')}
+                        ${categories.map(cat => `<option value="${cat.name}" ${cat.name === currentCategory ? 'selected' : ''}>${cat.name}</option>`).join('')}
                     </select>
                 </div>
 
@@ -248,6 +256,7 @@
 
         const handleCategoryFilter = () => {
             const selectedCategory = document.getElementById('category-select').value;
+            currentCategory = selectedCategory; // 更新當前選定的資料夾
             if (selectedCategory) {
                 displayedFiles = allFiles.filter(file => file.category === selectedCategory);
             } else {
@@ -268,6 +277,7 @@
             categories.push(newCategory);
             saveToLocalStorage();
             newCategoryInput.value = '';
+            currentCategory = newCategoryName; // 新增後自動選擇
             renderUI();
             showMessage(`已新增資料夾：${newCategoryName}`);
         };
@@ -277,8 +287,17 @@
             const textInput = textInputEl.value.trim();
             const selectedCategory = document.getElementById('category-select').value;
             
-            if (isConverting || !textInput || !selectedCategory) {
-                showMessage("請輸入文字並選擇資料夾！");
+            if (isConverting) {
+                return;
+            }
+
+            if (!textInput) {
+                showMessage("請輸入您想轉換的文字！");
+                return;
+            }
+
+            if (!selectedCategory) {
+                showMessage("請先選擇一個資料夾！");
                 return;
             }
 
@@ -332,9 +351,9 @@
                     category: selectedCategory,
                 };
 
-                allFiles.unshift(newFile); // 在列表前面新增
+                allFiles.unshift(newFile);
                 saveToLocalStorage();
-                handleCategoryFilter(); // 更新顯示的檔案列表
+                currentCategory = selectedCategory; // 確保完成後仍然選中
                 renderUI();
 
                 showMessage("轉換並儲存成功！");
@@ -354,8 +373,13 @@
         const handleUpload = (e) => {
             const file = e.target.files[0];
             const selectedCategory = document.getElementById('category-select').value;
-            if (!file || !selectedCategory) {
-                showMessage("請選擇一個檔案並選擇資料夾！");
+            
+            if (!file) {
+                showMessage("請選擇一個檔案！");
+                return;
+            }
+            if (!selectedCategory) {
+                showMessage("請選擇一個資料夾！");
                 return;
             }
 
@@ -374,7 +398,7 @@
 
                 allFiles.unshift(newFile);
                 saveToLocalStorage();
-                handleCategoryFilter();
+                currentCategory = selectedCategory; // 確保完成後仍然選中
                 renderUI();
 
                 showMessage("上傳成功！");
@@ -395,6 +419,11 @@
 
         // --- 應用程式初始化 ---
         window.onload = () => {
+            // 從本地儲存中讀取上次選擇的資料夾
+            const lastCategory = localStorage.getItem('lastCategory');
+            if (lastCategory) {
+                currentCategory = lastCategory;
+            }
             renderUI();
         };
     </script>
